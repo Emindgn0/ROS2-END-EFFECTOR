@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<sdf version="1.7">
+  <model name="arac_sase">
+    <static>true</static>
+    <link name="chassis">
+      <pose>0 0 0 0 0 0</pose>
+      <collision name="col">
+        <geometry>
+          <mesh>
+            <uri>file:///home/emin/ros2-end-effector/install/end_effector_ros2/share/end_effector_ros2/models/arac_sase/meshes/arac_sase.stl</uri>
+            <scale>0.008 0.008 0.008</scale>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name="vis">
+        <geometry>
+          <mesh>
+            <uri>file:///home/emin/ros2-end-effector/install/end_effector_ros2/share/end_effector_ros2/models/arac_sase/meshes/arac_sase.stl</uri>
+            <scale>0.008 0.008 0.008</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.65 1</ambient>
+          <diffuse>0.7 0.7 0.75 1</diffuse>
+          <specular>0.9 0.9 0.9 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
