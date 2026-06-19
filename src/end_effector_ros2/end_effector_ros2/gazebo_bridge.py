@@ -174,7 +174,7 @@ class GazeboBridge(Node):
         self.pub_zimpara     = self.create_publisher(Float64MultiArray, f'/gz/{ZIMPARA_CTRL}/commands', 10)
         self.pub_robot_state = self.create_publisher(String, '/end_effector/robot_state',  10)
         self.pub_can_status  = self.create_publisher(Bool,   '/end_effector/can_status',   10)
-        self.pub_drfl_status = self.create_publisher(String, '/end_effector/drfl_status',  10)
+        self.pub_drfl_status = self.create_publisher(String, '/end_effector/dsr2_status',  10)
         self.pub_load_cells  = self.create_publisher(String, '/end_effector/load_cells',   10)
         self.pub_sim_info    = self.create_publisher(String, '/end_effector/sim_info',     10)
         self.pub_log         = self.create_publisher(String, '/end_effector/log',          10)

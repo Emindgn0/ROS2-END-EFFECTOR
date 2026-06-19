@@ -16,8 +16,7 @@ Parametreler:
   model_name        (string, default: YOLO26s.pt)
   camera_index      (int,    default: 0)
   stream_fps        (int,    default: 30)
-  doosan_ip         (string, default: 192.168.137.100)
-  doosan_port       (int,    default: 12345)
+  use_real_robot    (bool,   default: false) — logic_node: DSR_ROBOT2 ile gerçek robot
 
 Sıra:
   Terminal 1: ros2 launch end_effector_ros2 gazebo.launch.py spawn_car:=true
@@ -52,10 +51,8 @@ def generate_launch_description():
             description='USB kamera indeksi'),
         DeclareLaunchArgument('stream_fps',       default_value='30',
             description='Kamera FPS'),
-        DeclareLaunchArgument('doosan_ip',        default_value='192.168.137.100',
-            description='Doosan controller IP'),
-        DeclareLaunchArgument('doosan_port',      default_value='12345',
-            description='Doosan DRFL port'),
+        DeclareLaunchArgument('use_real_robot',   default_value='false',
+            description='logic_node: DSR_ROBOT2 ile gerçek robot hareketi (false=Gazebo IK)'),
     ]
 
     # ── vision_node ───────────────────────────────────────────────────────
@@ -82,10 +79,8 @@ def generate_launch_description():
             'port':         LaunchConfiguration('can_port'),
             'baudrate':     LaunchConfiguration('baudrate'),
             'simulation':   LaunchConfiguration('simulation'),
-            'use_drfl':     True,
+            'use_dsr2':     True,
             'use_soem':     False,
-            'doosan_ip':    LaunchConfiguration('doosan_ip'),
-            'doosan_port':  LaunchConfiguration('doosan_port'),
             'publish_rate': 10.0,
         }],
     )
@@ -97,7 +92,8 @@ def generate_launch_description():
         name='logic_node',
         output='screen',
         parameters=[{
-            'simulation': LaunchConfiguration('simulation'),
+            'simulation':     LaunchConfiguration('simulation'),
+            'use_real_robot': LaunchConfiguration('use_real_robot'),
         }],
     )
 
@@ -107,6 +103,9 @@ def generate_launch_description():
         executable='gui_node',
         name='gui_node',
         output='screen',
+        parameters=[{
+            'use_real_robot': LaunchConfiguration('use_real_robot'),
+        }],
     )
 
     # ── gazebo_bridge — use_gazebo:=true ise ─────────────────────────────
@@ -128,7 +127,7 @@ def generate_launch_description():
         '  use_gazebo_cam  : ', LaunchConfiguration('use_gazebo_cam'),   '\n',
         '  can_port        : ', LaunchConfiguration('can_port'),         '\n',
         '  model_name      : ', LaunchConfiguration('model_name'),       '\n',
-        '  doosan_ip       : ', LaunchConfiguration('doosan_ip'),        '\n',
+        '  use_real_robot  : ', LaunchConfiguration('use_real_robot'),   '\n',
     ])
 
     # GUI kapandığında tüm launch sistemi kapat

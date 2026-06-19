@@ -11,6 +11,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String, Bool
+from .dsr2_interface import Dsr2Layer
 
 try:
     from PyQt6.QtWidgets import (
@@ -19,76 +20,15 @@ try:
         QProgressBar, QScrollArea, QSizePolicy, QSpinBox, QRadioButton,
     )
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-    from PyQt6.QtGui import QPixmap, QImage, QFont
+    from PyQt6.QtGui import QPixmap, QImage, QFont, QKeySequence, QShortcut
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
-
-try:
-    import DRFL
-    DRFL_AVAILABLE = True
-except ImportError:
-    DRFL_AVAILABLE = False
 
 # ── Sabitler ──────────────────────────────────────────────────────────────────
 SERVO_PRESETS = {'0°':0,'30°':30,'45°':45,'90°':90,'135°':135,'160°':160,'180°':180}
 SANDER_ON  = 111
 SANDER_OFF = 222
-DOOSAN_IP  = '192.168.137.100'
-DOOSAN_PORT = 12345
-
-
-# ── Doosan DRFL ───────────────────────────────────────────────────────────────
-class DoosanDRFLInterface:
-    def __init__(self, ip=DOOSAN_IP, port=DOOSAN_PORT, logger=None):
-        self.ip=ip; self.port=port
-        self.connected=False; self.sim_mode=not DRFL_AVAILABLE
-        self._log=logger or print; self._robot=None
-
-    def connect(self):
-        if self.sim_mode:
-            self._log('[DRFL] Simulation'); self.connected=True; return True
-        try:
-            self._robot=DRFL.RobotSystem()
-            self._robot.connect(self.ip,self.port)
-            self._robot.set_robot_mode(DRFL.ROBOT_MODE_AUTONOMOUS)
-            self.connected=True; self._log(f'[DRFL] Connected {self.ip}'); return True
-        except Exception as e:
-            self._log(f'[DRFL] Error: {e}'); self.connected=False; return False
-
-    def disconnect(self):
-        if self._robot and not self.sim_mode:
-            try: self._robot.disconnect()
-            except: pass
-        self.connected=False
-
-    def move_joint(self, angles, speed=30.0, accel=60.0):
-        """6-DOF eklem hareketi. D4.2 §3.2"""
-        if not self.connected: return False
-        if self.sim_mode: return True
-        try: self._robot.moveJ(angles, speed, accel); return True
-        except Exception as e: return False
-
-    def get_tcp_force(self):
-        """Doosan 6-eksen kuvvet sensörü. D4.2 §1.5"""
-        if not self.connected: return [0.0]*6
-        if self.sim_mode:
-            import random
-            base = 5.0 + 3.0 * math.sin(time.time() * 0.5)
-            return [round(base + random.gauss(0, 0.3), 2) for _ in range(6)]
-        try: return list(self._robot.get_tcp_force())
-        except: return [0.0]*6
-
-    def set_digital_output(self,port,val):
-        if not self.connected: return False
-        if self.sim_mode: return True
-        try: self._robot.set_digital_output(port,1 if val else 0); return True
-        except: return False
-
-    def emergency_stop(self):
-        if not self.sim_mode and self._robot:
-            try: self._robot.emergency_stop()
-            except: pass
 
 
 # ── ROS2 → Qt Köprüsü ────────────────────────────────────────────────────────
@@ -235,9 +175,9 @@ class ServoPanel(QGroupBox):
 # ── Ana Pencere ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
-    def __init__(self,node,bridge,drfl):
+    def __init__(self,node,bridge,dsr2):
         super().__init__()
-        self.node=node; self.bridge=bridge; self.drfl=drfl
+        self.node=node; self.bridge=bridge; self.dsr2=dsr2
         self._can_ok=False; self._last_frame=0.0; self._cur_pix=None
 
         self.pub_start    = node.create_publisher(Bool,  '/end_effector/mission_start',  10)
@@ -252,15 +192,19 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        threading.Thread(target=self._init_drfl,daemon=True).start()
-        self.setWindowTitle('End Effector Control — ROS2 + Doosan DRFL')
+        threading.Thread(target=self._init_dsr2,daemon=True).start()
+        self.setWindowTitle('End Effector Control — ROS2 + DSR_ROBOT2')
         self.setMinimumSize(900,600); self.resize(1440,900)
+        QShortcut(QKeySequence('Escape'), self,
+                  lambda: self.showNormal() if self.isFullScreen() else self.showMinimized())
+        QShortcut(QKeySequence('F11'), self,
+                  lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen())
 
-    def _init_drfl(self):
-        self.drfl.sim_mode = self.rb_sim.isChecked() or not DRFL_AVAILABLE
-        ok=self.drfl.connect()
-        txt=(f'DRFL {"✓ Connected" if ok else "✗ Disconnected"} '
-             f'{"[SIM]" if self.drfl.sim_mode else "[REAL]"}')
+    def _init_dsr2(self):
+        self.dsr2.sim = self.rb_sim.isChecked()
+        ok=self.dsr2.connect()
+        txt=(f'DSR_ROBOT2 {"✓ Connected" if ok else "✗ Disconnected"} '
+             f'{"[SIM]" if self.dsr2.sim else "[REAL]"}')
         QTimer.singleShot(0,lambda: self._drfl_ui(ok,txt))
 
     def _drfl_ui(self,ok,txt):
@@ -472,11 +416,11 @@ class MainWindow(QMainWindow):
         hw=QGroupBox(' Doosan H2515 — Connection')
         hwl=QVBoxLayout(hw); hwl.setContentsMargins(8,14,8,8); hwl.setSpacing(5)
         dr=QHBoxLayout()
-        self.lbl_drfl=QLabel('DRFL initializing...')
+        self.lbl_drfl=QLabel('DSR_ROBOT2 initializing...')
         self.lbl_drfl.setStyleSheet('color:#aaa;font-size:10px;')
         dr.addWidget(self.lbl_drfl,1)
         btn_rc=QPushButton('Connect'); btn_rc.setFixedWidth(80)
-        btn_rc.clicked.connect(self._reconnect_drfl); dr.addWidget(btn_rc)
+        btn_rc.clicked.connect(self._reconnect_dsr2); dr.addWidget(btn_rc)
         hwl.addLayout(dr)
         mr=QHBoxLayout()
         self.rb_sim =QRadioButton('Simulation')
@@ -598,8 +542,8 @@ class MainWindow(QMainWindow):
             'padding:5px;border:1px solid #114411;font-family:Consolas;'
             'font-size:11px;font-weight:bold;')
         self._log('[SANDER] ON')
-        if self.drfl.connected and not self.rb_sim.isChecked():
-            self.drfl.set_digital_output(1,True)
+        if self.dsr2.connected and not self.rb_sim.isChecked():
+            self.dsr2.set_digital_output(1,True)
 
     def _sander_off(self):
         self.pub_sander.publish(String(data=json.dumps({'sander':SANDER_OFF})))
@@ -608,17 +552,17 @@ class MainWindow(QMainWindow):
             'padding:5px;border:1px solid #441111;font-family:Consolas;'
             'font-size:11px;font-weight:bold;')
         self._log('[SANDER] OFF')
-        if self.drfl.connected and not self.rb_sim.isChecked():
-            self.drfl.set_digital_output(1,False)
+        if self.dsr2.connected and not self.rb_sim.isChecked():
+            self.dsr2.set_digital_output(1,False)
 
     def _emergency(self):
         self.pub_emerg.publish(Bool(data=True))
-        self.drfl.emergency_stop(); self._sander_off()
+        self.dsr2.emergency_stop(); self._sander_off()
         self._log('[EMERGENCY] Stopped!')
 
-    def _reconnect_drfl(self):
-        self.drfl.disconnect()
-        threading.Thread(target=self._init_drfl,daemon=True).start()
+    def _reconnect_dsr2(self):
+        self.dsr2.disconnect()
+        threading.Thread(target=self._init_dsr2,daemon=True).start()
 
     def _set_model(self):
         m=self.cbo_model.currentText()
@@ -644,10 +588,10 @@ class MainWindow(QMainWindow):
             self.bridge.can_connected = self._can_ok
             self.lbl_can_st.setText('● Real Hardware — waiting for CAN...')
             self.lbl_can_st.setStyleSheet('color:#ffaa00;font-family:Consolas;font-size:10px;')
-            self.lbl_drfl.setText('Real Hardware — connecting DRFL...')
+            self.lbl_drfl.setText('Real Hardware — connecting DSR_ROBOT2...')
             self.lbl_drfl.setStyleSheet('color:#ffaa00;font-weight:bold;font-size:10px;')
-            self._log('[MODE] Real Hardware selected — waiting for CAN + camera + DRFL')
-            threading.Thread(target=self._init_drfl, daemon=True).start()
+            self._log('[MODE] Real Hardware selected — waiting for CAN + camera + DSR_ROBOT2')
+            threading.Thread(target=self._init_dsr2, daemon=True).start()
 
     def _check_cam(self):
         if self._last_frame>0 and (time.time()-self._last_frame)>4.0:
@@ -765,7 +709,7 @@ class MainWindow(QMainWindow):
             pass
         # Diğer node'ların mesajı alması ve spin'den çıkması için bekle
         import time as _t; _t.sleep(1.2)
-        self.drfl.disconnect()
+        self.dsr2.disconnect()
         super().closeEvent(ev)
 
 
@@ -782,13 +726,13 @@ def main(args=None):
 
     rclpy.init(args=args)
     ros_node=GUINode()
+    ros_node.declare_parameter('use_real_robot', False)
+    use_real = ros_node.get_parameter('use_real_robot').get_parameter_value().bool_value
     bridge  =ROSBridge(ros_node)
-    drfl    =DoosanDRFLInterface(
-        ip=DOOSAN_IP,port=DOOSAN_PORT,
-        logger=lambda m: ros_node.get_logger().info(m))
+    dsr2    =Dsr2Layer(node=ros_node, sim=not use_real, logger=ros_node.get_logger())
 
     app=QApplication(sys.argv); app.setStyle('Fusion')
-    win=MainWindow(ros_node,bridge,drfl); win.show()
+    win=MainWindow(ros_node,bridge,dsr2); win.showMaximized()
 
     # QTimer ile spin_once — sinyaller Qt main thread'de işlenir, cross-thread sorun olmaz
     ros_timer = QTimer()

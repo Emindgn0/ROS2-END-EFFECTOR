@@ -7,3 +7,12 @@ __pycache__/
 .cache/
 *.egg-info/
 src/doosan-robot2/
+*.pdf
+*.gv
+*.pt
+*.ico
+*.png
+icon.svg
+yolov8n.pt
+.claude/
+.vscode/

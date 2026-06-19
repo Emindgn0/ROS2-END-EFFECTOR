@@ -40,21 +40,6 @@ try:
 except ImportError:
     CARTESIO_AVAILABLE = False
 
-# ── DSR_ROBOT2 import — gerçek robot yoksa Gazebo moduna düşer ────────────────
-DSR_ROBOT2_AVAILABLE = False
-try:
-    import DR_init as _DR_init
-    _DR_init.__dsr__id    = 'dsr01'
-    _DR_init.__dsr__model = 'h2515'
-    from DSR_ROBOT2 import (
-        movel as _dsr_movel, movej as _dsr_movej,
-        set_velx, set_accx, set_robot_mode,
-        posx, posj, ROBOT_MODE_AUTONOMOUS,
-    )
-    DSR_ROBOT2_AVAILABLE = True
-except Exception:
-    pass
-
 # ── Kalibrasyon & Sabitler ────────────────────────────────────────────────────
 FRAME_CX         = 640
 FRAME_CY         = 360
@@ -237,26 +222,55 @@ class LogicNode(Node):
 
         self.create_timer(0.1, self._publish_status)
 
-        # DSR_ROBOT2 hazırlık
+        # DSR_ROBOT2 hazırlık — DR_init.__dsr__node import'tan ÖNCE atanmalı
+        # (DSR_ROBOT2.py import anında bu node ile servis client'ları oluşturur,
+        # bkz. movel_test.py run_real())
+        self._move_line_cli   = None
+        self._set_mode_cli    = None
+        self._robot_mode_set  = False
         if self._use_real_robot:
-            if not DSR_ROBOT2_AVAILABLE:
+            try:
+                from dsr_msgs2.srv import MoveLine, SetRobotMode
+                self._move_line_cli = self.create_client(MoveLine,     '/dsr01/motion/move_line')
+                self._set_mode_cli  = self.create_client(SetRobotMode, '/dsr01/system/set_robot_mode')
+                # set_robot_mode spin başladıktan sonra timer'dan çağrılır;
+                # __init__ içinde spin_until_future_complete kullanmak
+                # sonraki rclpy.spin() callback'lerini bozmaktadır.
+                self._dsr_mode_timer = self.create_timer(0.5, self._dsr_set_robot_mode_once)
+                self.get_logger().info('DSR_ROBOT2 hazır — gerçek robot modu')
+            except Exception as e:
                 self.get_logger().error(
-                    'use_real_robot=True ama DSR_ROBOT2 yüklenemedi! '
+                    f'use_real_robot=True ama DSR_ROBOT2 yüklenemedi: {type(e).__name__}: {e} '
                     'Gazebo moduna düşülüyor.'
                 )
                 self._use_real_robot = False
-            else:
-                _DR_init.__dsr__node = self
-                set_robot_mode(ROBOT_MODE_AUTONOMOUS)
-                set_velx(DSR_VEL_LIN, DSR_VEL_DEG)
-                set_accx(DSR_ACC_LIN, DSR_ACC_DEG)
-                self.get_logger().info('DSR_ROBOT2 hazır — gerçek robot modu')
 
         if self._sim_mode:
             self.get_logger().warn('SİMÜLASYON MODU: sahte çapak + temas aktif')
 
         mode_str = 'GERÇEK ROBOT' if self._use_real_robot else 'GAZEBO/SİMÜLASYON'
         self.get_logger().info(f'LogicNode başlatıldı — mod: {mode_str}')
+
+    # ── DSR robot modu başlatma (spin sonrası, timer callback'ten) ───────────
+    def _dsr_set_robot_mode_once(self):
+        if self._robot_mode_set or not self._use_real_robot:
+            self.destroy_timer(self._dsr_mode_timer)
+            return
+        from dsr_msgs2.srv import SetRobotMode
+        req = SetRobotMode.Request()
+        req.robot_mode = 1  # ROBOT_MODE_AUTONOMOUS
+        future = self._set_mode_cli.call_async(req)
+        future.add_done_callback(self._dsr_mode_cb)
+        # timer otomatik ateşlemeyi durdur (bir kez yeter)
+        self.destroy_timer(self._dsr_mode_timer)
+
+    def _dsr_mode_cb(self, future):
+        try:
+            future.result()
+            self._robot_mode_set = True
+            self.get_logger().info('[DSR] Robot AUTONOMOUS moda alındı')
+        except Exception as e:
+            self.get_logger().error(f'[DSR] set_robot_mode hatası: {e}')
 
     # ── Yardımcı ──────────────────────────────────────────────────────────────
     def _log(self, msg: str, level: str = 'INFO'):
@@ -316,9 +330,26 @@ class LogicNode(Node):
 
     def _movel_real(self, x_m: float, y_m: float, z_m: float,
                     rx_deg: float = 0.0, ry_deg: float = 180.0, rz_deg: float = 0.0):
-        """Gerçek robota movel komutu — metre → mm dönüşümü dahil."""
-        pos = posx(x_m * 1000, y_m * 1000, z_m * 1000, rx_deg, ry_deg, rz_deg)
-        _dsr_movel(pos, vel=[DSR_VEL_LIN, DSR_VEL_DEG], acc=[DSR_ACC_LIN, DSR_ACC_DEG])
+        """Gerçek robota move_line servisi — rclpy.spin çakışmasını önlemek için
+        call_async + future.done() polling kullanır (spin_until_future_complete değil).
+        Main executor future'ı tamamlar; Mission thread sadece poll eder."""
+        from dsr_msgs2.srv import MoveLine
+        req = MoveLine.Request()
+        req.pos       = [x_m * 1000, y_m * 1000, z_m * 1000, rx_deg, ry_deg, rz_deg]
+        req.vel       = [float(DSR_VEL_LIN), float(DSR_VEL_DEG)]
+        req.acc       = [float(DSR_ACC_LIN), float(DSR_ACC_DEG)]
+        req.time      = 0.0
+        req.radius    = 0.0
+        req.ref       = 0   # DR_BASE
+        req.mode      = 0   # DR_MV_MOD_ABS
+        req.blend_type = 0
+        req.sync_type  = 0  # SYNC — controller bloklar, future motion bitince çözülür
+        future = self._move_line_cli.call_async(req)
+        deadline = time.time() + 60.0
+        while not future.done() and not self.emergency and time.time() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            raise RuntimeError('movel timeout (60 s)')
 
     def _move_to(self, x: float, y: float, z: float):
         """
@@ -335,6 +366,9 @@ class LogicNode(Node):
     # ── Kuvvet ────────────────────────────────────────────────────────────────
     def _get_contact_force(self) -> float:
         if time.time() - self._load_cells_stamp > 2.0:
+            if self._sim_mode and getattr(self, '_contact_made', False):
+                import math as _math
+                return round(20.0 + 8.0 * _math.sin(time.time() * 0.7), 1)
             return 0.0
         with self._lock:
             vals = [v for v in self._load_cells if v > 0]

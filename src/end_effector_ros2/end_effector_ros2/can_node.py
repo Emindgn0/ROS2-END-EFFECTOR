@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-can_node.py - CAN Bus + Doosan DRFL + SOEM EtherCAT ROS2 Düğümü
+can_node.py - CAN Bus + DSR_ROBOT2 + SOEM EtherCAT ROS2 Düğümü
 =================================================================
 Düzeltmeler:
   - CAN bağlantısı olmadan simülasyon load cell verisi YAYINLANMİYOR
   - can_status False iken load_cells topic'i susturuldu
   - Simülasyon modu SADECE simulation:=true parametresiyle açılır
-  - DRFL/SOEM katmanları korundu (D4.2 §3.1.1)
+  - Robot hareketi YALNIZCA logic_node.py üzerinden gönderilir — bu düğüm
+    sadece tool I/O (zımpara röle) ve kuvvet sensörü okuması yapar, robot
+    eklemlerini hareket ettirmez (controller'a tek harici bağlantı kuralı)
+  - DSR_ROBOT2/SOEM katmanları korundu (D4.2 §3.1.1)
 """
 
 import rclpy
@@ -17,6 +20,7 @@ import json
 import math
 
 from std_msgs.msg import String, Bool, Float64
+from .dsr2_interface import Dsr2Layer
 
 try:
     import serial
@@ -24,12 +28,6 @@ try:
     SERIAL_AVAILABLE = True
 except ImportError:
     SERIAL_AVAILABLE = False
-
-try:
-    import DRFL
-    DRFL_AVAILABLE = True
-except ImportError:
-    DRFL_AVAILABLE = False
 
 try:
     import pysoem
@@ -46,8 +44,6 @@ LISTEN_INTERVAL  = 0.01
 SANDER_ON        = 111
 SANDER_OFF       = 222
 
-DOOSAN_IP               = '192.168.137.100'
-DOOSAN_PORT             = 12345
 DOOSAN_FLANGE_DO_SANDER = 1
 ETHERCAT_ADAPTER        = 'eth0'
 ETHERCAT_TIMEOUT        = 50_000  # µs
@@ -80,114 +76,6 @@ def _build_frame(s1: int, s2: int, sander: int) -> bytearray:
         s1 & 0xFF, s2 & 0xFF, sander & 0xFF,
         0x00, 0x55
     ])
-
-
-# ── Doosan DRFL Katmanı ───────────────────────────────────────────────────────
-class DrflLayer:
-    """
-    Doosan H2515 DRFL API sarmalayıcısı.
-    D4.2 §3.1.1: Real-Time DRFL API — TCP/UDP üzerinden robot controller box
-    """
-
-    def __init__(self, ip, port, sim, logger):
-        self.ip        = ip
-        self.port      = port
-        self.sim       = sim or not DRFL_AVAILABLE
-        self.log       = logger
-        self._robot    = None
-        self.connected = False
-
-    def connect(self) -> bool:
-        if self.sim:
-            self.connected = True
-            self.log.info('[DRFL] Simülasyon modu aktif')
-            return True
-        try:
-            self._robot = DRFL.RobotSystem()
-            self._robot.connect(self.ip, self.port)
-            self._robot.set_robot_mode(DRFL.ROBOT_MODE_AUTONOMOUS)
-            self.connected = True
-            self.log.info(f'[DRFL] Doosan bağlandı: {self.ip}:{self.port}')
-            return True
-        except Exception as e:
-            self.log.error(f'[DRFL] Bağlantı hatası: {e}')
-            return False
-
-    def disconnect(self):
-        if self._robot and not self.sim:
-            try: self._robot.disconnect()
-            except Exception: pass
-        self.connected = False
-
-    def move_joint(self, angles, speed=30.0, accel=60.0):
-        if not self.connected: return False
-        if self.sim:
-            self.log.debug(f'[DRFL-SIM] moveJ: {angles}'); return True
-        try:
-            self._robot.moveJ(angles, speed, accel); return True
-        except Exception as e:
-            self.log.error(f'[DRFL] moveJ: {e}'); return False
-
-    def set_digital_output(self, port, val):
-        """Doosan flange 6+6 I/O — zımpara relay (D4.2 §1.5.1)"""
-        if not self.connected: return False
-        if self.sim:
-            self.log.debug(f'[DRFL-SIM] DO[{port}]={val}'); return True
-        try:
-            self._robot.set_digital_output(port, 1 if val else 0); return True
-        except Exception as e:
-            self.log.error(f'[DRFL] DO: {e}'); return False
-
-    def get_tcp_force(self):
-        """Doosan dahili 6-eksen kuvvet sensörü (D4.2 §1.5, 0.2 N hassasiyet)"""
-        if not self.connected: return [0.0] * 6
-        if self.sim:
-            import random
-            base = 5.0 + 3.0 * math.sin(time.time() * 0.5)
-            return [round(base + random.gauss(0, 0.2), 2) for _ in range(6)]
-        try: return list(self._robot.get_tcp_force())
-        except Exception: return [0.0] * 6
-
-    def halt(self):
-        """Mevcut hareketi iptal et — E-stop'tan önce güvenli durdurma adımı."""
-        if self.sim:
-            self.log.warn('[DRFL-SIM] HALT'); return
-        if self._robot:
-            try: self._robot.halt()
-            except Exception as e: self.log.error(f'[DRFL] halt: {e}')
-
-    def get_current_posj(self):
-        """Anlık eklem açılarını döndür (6 eksen, rad) — D4.2 §3.1.1"""
-        if not self.connected: return [0.0] * 6
-        if self.sim: return [0.0] * 6
-        try: return list(self._robot.get_current_posj())
-        except Exception as e:
-            self.log.error(f'[DRFL] get_current_posj: {e}'); return [0.0] * 6
-
-    def movel(self, pose, speed=50.0, accel=100.0):
-        """Kartezyen doğrusal hareket — D4.2 §3.1.1 moveL"""
-        if not self.connected: return False
-        if self.sim:
-            self.log.debug(f'[DRFL-SIM] moveL: {pose}'); return True
-        try:
-            self._robot.moveL(pose, speed, accel); return True
-        except Exception as e:
-            self.log.error(f'[DRFL] moveL: {e}'); return False
-
-    def get_external_torque(self):
-        """Dış eklem torklarını döndür (6 eksen, Nm) — yük hücresi cross-check."""
-        if not self.connected: return [0.0] * 6
-        if self.sim: return [0.0] * 6
-        try: return list(self._robot.get_external_torque())
-        except Exception as e:
-            self.log.error(f'[DRFL] get_external_torque: {e}'); return [0.0] * 6
-
-    def emergency_stop(self):
-        if not self.sim and self._robot:
-            try: self._robot.emergency_stop()
-            except Exception as e: self.log.error(f'[DRFL] e_stop: {e}')
-        else:
-            self.log.warn('[DRFL-SIM] ACİL DURDURMA')
 
 
 # ── SOEM EtherCAT Katmanı ─────────────────────────────────────────────────────
@@ -275,20 +163,16 @@ class CANNode(Node):
         self.declare_parameter('baudrate',         2000000)
         self.declare_parameter('simulation',       False)   # SADECE True ise sim
         self.declare_parameter('publish_rate',     10.0)
-        self.declare_parameter('use_drfl',         True)
+        self.declare_parameter('use_dsr2',         True)
         self.declare_parameter('use_soem',         False)
-        self.declare_parameter('doosan_ip',        DOOSAN_IP)
-        self.declare_parameter('doosan_port',      DOOSAN_PORT)
         self.declare_parameter('ethercat_adapter', ETHERCAT_ADAPTER)
 
         self.port         = self.get_parameter('port').value
         self.baudrate     = self.get_parameter('baudrate').value
         self.simulation   = self.get_parameter('simulation').value
         self.publish_rate = self.get_parameter('publish_rate').value
-        use_drfl          = self.get_parameter('use_drfl').value
+        use_dsr2          = self.get_parameter('use_dsr2').value
         use_soem          = self.get_parameter('use_soem').value
-        doosan_ip         = self.get_parameter('doosan_ip').value
-        doosan_port       = self.get_parameter('doosan_port').value
         ethercat_adapter  = self.get_parameter('ethercat_adapter').value
 
         # Durum
@@ -303,11 +187,10 @@ class CANNode(Node):
         self._can_active   = False   # Gerçek CAN bağlantısı var mı?
         self._last_heartbeat = time.time()  # watchdog için son komut zamanı
 
-        # DRFL ve SOEM katmanları
-        self.drfl = DrflLayer(
-            ip=doosan_ip, port=doosan_port,
-            sim=self.simulation, logger=self.get_logger()
-        ) if use_drfl else None
+        # DSR_ROBOT2 ve SOEM katmanları
+        self.dsr2 = Dsr2Layer(
+            node=self, sim=self.simulation, logger=self.get_logger()
+        ) if use_dsr2 else None
 
         self.soem = SoemLayer(
             adapter=ethercat_adapter,
@@ -320,7 +203,7 @@ class CANNode(Node):
         self.pub_servo   = self.create_publisher(String,  '/end_effector/servo_state',      10)
         self.pub_gz_s1   = self.create_publisher(Float64, '/end_effector/gazebo/joint_s1',  10)
         self.pub_gz_s2   = self.create_publisher(Float64, '/end_effector/gazebo/joint_s2',  10)
-        self.pub_drfl_st = self.create_publisher(String,  '/end_effector/drfl_status',      10)
+        self.pub_dsr2_st = self.create_publisher(String,  '/end_effector/dsr2_status',      10)
 
         # Subscriber'lar
         self.create_subscription(String, '/end_effector/servo_command',
@@ -336,7 +219,7 @@ class CANNode(Node):
 
         # Timer'lar
         self.create_timer(1.0 / self.publish_rate, self._publish_state)
-        self.create_timer(0.5, self._publish_drfl_status)
+        self.create_timer(0.5, self._publish_dsr2_status)
         self.create_timer(5.0, self._watchdog_check)
 
         # Başlat
@@ -367,10 +250,10 @@ class CANNode(Node):
                 )
                 # Simülasyon moduna GEÇME — sadece uyar
 
-        # DRFL ve SOEM her iki modda da başla
-        if self.drfl:
-            threading.Thread(target=self.drfl.connect,
-                             daemon=True, name='DRFL-Connect').start()
+        # DSR_ROBOT2 ve SOEM her iki modda da başla
+        if self.dsr2:
+            threading.Thread(target=self.dsr2.connect,
+                             daemon=True, name='DSR2-Connect').start()
         if self.soem:
             threading.Thread(target=self.soem.connect,
                              daemon=True, name='SOEM-Connect').start()
@@ -487,30 +370,35 @@ class CANNode(Node):
     def _cb_emergency(self, msg: Bool):
         if msg.data:
             self.get_logger().error('!!! ACİL DURDURMA !!!')
-            if self.drfl:
-                self.drfl.halt()            # önce hareketi durdur
-                self.drfl.emergency_stop()  # sonra donanım E-stop
+            if self.dsr2:
+                self.dsr2.halt()            # önce hareketi durdur
+                self.dsr2.emergency_stop()  # sonra donanım E-stop
             self._send_frame(160, 160, SANDER_OFF)
 
     # ── Watchdog ──────────────────────────────────────────────────────────────
     def _watchdog_check(self):
         """
-        EN ISO 13849-1 yazılım izleme: DRFL bağlıyken 60s komut gelmezse
-        güvenli durdurma uygula.
+        EN ISO 13849-1 yazılım izleme: DSR_ROBOT2 bağlıyken 60s komut
+        gelmezse güvenli durdurma uygula.
         """
-        if (self.drfl and self.drfl.connected and not self.drfl.sim
+        if (self.dsr2 and self.dsr2.connected and not self.dsr2.sim
                 and time.time() - self._last_heartbeat > 60.0):
             self.get_logger().error('[WATCHDOG] 60s komut yok — güvenli durdurma!')
-            self.drfl.halt()
+            self.dsr2.halt()
 
     # ── Çok katmanlı komut gönderimi ──────────────────────────────────────────
     def _send_frame(self, s1: int, s2: int, sander: int):
         """
         D4.2 §3.1.1 mimarisine göre:
-          1. Seri CAN   — mevcut end-effector protokolü
+          1. Seri CAN   — mevcut end-effector protokolü (pan/tilt servo + zımpara)
           2. SOEM       — EtherCAT fieldbus
-          3. DRFL       — Doosan flange I/O + eklem hareketi
+          3. DSR_ROBOT2 — Doosan flange/tool I/O (zımpara röle)
           4. Gazebo     — simülasyon topic'leri
+
+        NOT: Robot eklemleri (joint5/6) bu düğümden HAREKET ETTİRİLMEZ —
+        pan/tilt kamera servoları ayrı fiziksel donanımdır (CAN üzerinden),
+        Doosan kolunun kendisiyle karıştırılmamalı. Kol hareketi yalnızca
+        logic_node.py üzerinden DSR_ROBOT2 movel/movej ile gönderilir.
         """
         self._last_heartbeat = time.time()
         self.last_s1     = s1
@@ -533,13 +421,9 @@ class CANNode(Node):
         if self.soem:
             self.soem.send_servo(s1, s2, sander)
 
-        # 3. DRFL — flange I/O (zımpara) + joint
-        if self.drfl and self.drfl.connected:
-            self.drfl.set_digital_output(DOOSAN_FLANGE_DO_SANDER, sander == SANDER_ON)
-            if not self.simulation:
-                j5 = float(s1 - 90)
-                j6 = float(s2 - 90)
-                self.drfl.move_joint([0.0, 0.0, 0.0, 0.0, j5, j6])
+        # 3. DSR_ROBOT2 — flange/tool I/O (zımpara röle)
+        if self.dsr2 and self.dsr2.connected:
+            self.dsr2.set_digital_output(DOOSAN_FLANGE_DO_SANDER, sander == SANDER_ON)
 
         # 4. Gazebo joint topic'leri (her zaman yayınla)
         self.pub_gz_s1.publish(Float64(data=math.radians(s1 - 90)))
@@ -555,10 +439,10 @@ class CANNode(Node):
             vals = self.soem.read_load_cells()
             if vals: self.load_cells = vals
 
-        # DRFL kuvvet sensörü (gerçek donanımda)
-        if (self.drfl and self.drfl.connected
-                and not self.drfl.sim and not self.simulation):
-            forces = self.drfl.get_tcp_force()
+        # DSR_ROBOT2 tool force sensörü (gerçek donanımda)
+        if (self.dsr2 and self.dsr2.connected
+                and not self.dsr2.sim and not self.simulation):
+            forces = self.dsr2.get_tcp_force()
             if forces and len(forces) >= 4:
                 self.load_cells = [round(abs(f), 2) for f in forces[:4]]
 
@@ -574,12 +458,12 @@ class CANNode(Node):
             's1': self.last_s1, 's2': self.last_s2, 'sander': self.last_sander,
         })))
 
-    def _publish_drfl_status(self):
-        drfl_ok = self.drfl.connected if self.drfl else False
+    def _publish_dsr2_status(self):
+        dsr2_ok = self.dsr2.connected if self.dsr2 else False
         soem_ok = self.soem.connected if self.soem else False
-        self.pub_drfl_st.publish(String(data=json.dumps({
-            'drfl_connected': drfl_ok,
-            'drfl_sim':       self.drfl.sim if self.drfl else True,
+        self.pub_dsr2_st.publish(String(data=json.dumps({
+            'dsr2_connected': dsr2_ok,
+            'dsr2_sim':       self.dsr2.sim if self.dsr2 else True,
             'soem_connected': soem_ok,
             'soem_sim':       self.soem.sim if self.soem else True,
             'can_active':     self._can_active,
@@ -591,8 +475,8 @@ class CANNode(Node):
         if new_sim == self.simulation:
             return
         self.simulation = new_sim
-        if self.drfl:
-            self.drfl.sim = new_sim or not DRFL_AVAILABLE
+        if self.dsr2:
+            self.dsr2.sim = new_sim
 
         if new_sim:
             self.get_logger().info('[MOD] Simülasyon — CAN devre dışı')
@@ -609,9 +493,9 @@ class CANNode(Node):
             if SERIAL_AVAILABLE and not self._can_active:
                 threading.Thread(target=self._connect_serial,
                                  daemon=True, name='CAN-ModeSwitch').start()
-            if self.drfl and not self.drfl.connected:
-                threading.Thread(target=self.drfl.connect,
-                                 daemon=True, name='DRFL-ModeSwitch').start()
+            if self.dsr2 and not self.dsr2.connected:
+                threading.Thread(target=self.dsr2.connect,
+                                 daemon=True, name='DSR2-ModeSwitch').start()
 
     def _cb_shutdown(self, msg):
         if msg.data:
@@ -624,7 +508,7 @@ class CANNode(Node):
         self._running = False
         if self._ser and self._ser.is_open:
             self._ser.close()
-        if self.drfl: self.drfl.disconnect()
+        if self.dsr2: self.dsr2.disconnect()
         if self.soem: self.soem.disconnect()
         super().destroy_node()
 
