@@ -11,8 +11,6 @@ src/doosan-robot2/
 *.gv
 *.pt
 *.ico
-*.png
-icon.svg
 yolov8n.pt
 .claude/
 .vscode/
