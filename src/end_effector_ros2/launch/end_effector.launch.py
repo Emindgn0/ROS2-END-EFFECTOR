@@ -79,7 +79,7 @@ def generate_launch_description():
             'port':         LaunchConfiguration('can_port'),
             'baudrate':     LaunchConfiguration('baudrate'),
             'simulation':   LaunchConfiguration('simulation'),
-            'use_dsr2':     True,
+            'use_dsr2':     False,
             'use_soem':     False,
             'publish_rate': 10.0,
         }],
@@ -105,6 +105,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_real_robot': LaunchConfiguration('use_real_robot'),
+            'simulation':     LaunchConfiguration('simulation'),
         }],
     )
 

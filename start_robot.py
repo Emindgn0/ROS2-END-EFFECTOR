@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 start_robot.py — Doosan H2515 End Effector Başlatıcı
-Ethernet kablosu takıldıktan sonra çalıştırılır.
-Robot IP girilirse gerçek robot modu, boş bırakılırsa simülasyon.
+3 mod:
+  Simülasyon   — dsr_bringup2 (virtual) + simulation:=true
+  CAN Donanım  — sadece CAN kart + kamera, DSR robot yok
+  Gerçek Robot — dsr_bringup2 (real) + CAN kart
 """
 
 import sys
@@ -21,8 +23,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-WS   = os.path.expanduser('~/ros2-end-effector')
-BASH = '/bin/bash'
+WS    = os.path.expanduser('~/ros2-end-effector')
+BASH  = '/bin/bash'
 SETUP = f'source /opt/ros/humble/setup.bash && source {WS}/install/setup.bash'
 
 STYLE = """
@@ -39,29 +41,34 @@ QPushButton {
     border-radius: 6px; padding: 10px 0;
     font-size: 13px; font-weight: bold;
 }
-QPushButton#real { background: #a6e3a1; color: #1e1e2e; }
-QPushButton#real:hover { background: #94e2d5; }
+QPushButton#can  { background: #a6e3a1; color: #1e1e2e; }
+QPushButton#can:hover  { background: #94e2d5; }
+QPushButton#real { background: #f38ba8; color: #1e1e2e; }
+QPushButton#real:hover { background: #eba0ac; }
 QPushButton#sim  { background: #45475a; color: #cdd6f4; }
 QPushButton#sim:hover  { background: #585b70; }
-QProgressDialog { background: #1e1e2e; color: #cdd6f4; }
 """
+
+MODE_SIM  = 'sim'
+MODE_CAN  = 'can'
+MODE_REAL = 'real'
 
 
 class StartupDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.robot_ip = '127.0.0.1'
-        self.sim_mode = True
+        self.mode      = MODE_CAN
+        self.robot_ip  = '192.168.137.100'
         self._build()
 
     def _build(self):
         self.setWindowTitle('Doosan H2515 — End Effector')
-        self.setFixedSize(460, 230)
+        self.setFixedSize(460, 260)
         self.setStyleSheet(STYLE)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 24)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
 
         title = QLabel('🤖  Doosan H2515 — B-Pillar Zımparalama')
         title.setObjectName('title')
@@ -72,33 +79,45 @@ class StartupDialog(QDialog):
         sep.setStyleSheet('color: #45475a; margin: 2px 0;')
         lay.addWidget(sep)
 
-        lay.addWidget(QLabel('Robot IP Adresi:'))
-
+        lay.addWidget(QLabel('Robot IP Adresi (sadece Gerçek Robot için):'))
         self.ip_edit = QLineEdit('192.168.137.100')
         self.ip_edit.setPlaceholderText('ör. 192.168.137.100')
         lay.addWidget(self.ip_edit)
 
-        hint = QLabel('İpucu: IP girmeden "Simülasyon" seçin → Gazebo/sanal mod')
+        hint = QLabel('CAN Donanım: USB seri kart + kamera — DSR robot gerekmez')
         hint.setObjectName('sub')
         lay.addWidget(hint)
 
-        lay.addSpacing(4)
+        lay.addSpacing(6)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
+        btn_row.setSpacing(8)
 
         b_sim = QPushButton('Simülasyon')
         b_sim.setObjectName('sim')
         b_sim.clicked.connect(self._launch_sim)
         btn_row.addWidget(b_sim)
 
-        b_real = QPushButton('Robotu Başlat  ▶')
+        b_can = QPushButton('CAN Donanım  ▶')
+        b_can.setObjectName('can')
+        b_can.setDefault(True)
+        b_can.clicked.connect(self._launch_can)
+        btn_row.addWidget(b_can)
+
+        b_real = QPushButton('Gerçek Robot')
         b_real.setObjectName('real')
-        b_real.setDefault(True)
         b_real.clicked.connect(self._launch_real)
         btn_row.addWidget(b_real)
 
         lay.addLayout(btn_row)
+
+    def _launch_sim(self):
+        self.mode = MODE_SIM
+        self.accept()
+
+    def _launch_can(self):
+        self.mode = MODE_CAN
+        self.accept()
 
     def _launch_real(self):
         ip = self.ip_edit.text().strip()
@@ -106,12 +125,7 @@ class StartupDialog(QDialog):
             QMessageBox.warning(self, 'Hata', 'IP adresi boş olamaz.')
             return
         self.robot_ip = ip
-        self.sim_mode = False
-        self.accept()
-
-    def _launch_sim(self):
-        self.robot_ip = '127.0.0.1'
-        self.sim_mode = True
+        self.mode = MODE_REAL
         self.accept()
 
 
@@ -148,10 +162,8 @@ def main():
     if dlg.exec() != QDialog.DialogCode.Accepted:
         sys.exit(0)
 
-    sim      = dlg.sim_mode
-    ip       = dlg.robot_ip
-    mode     = 'virtual' if sim else 'real'
-    use_real = 'false'   if sim else 'true'
+    mode = dlg.mode
+    ip   = dlg.robot_ip
 
     procs = []
 
@@ -163,39 +175,60 @@ def main():
     signal.signal(signal.SIGINT,  cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    # ── 1. DSR Bringup ───────────────────────────────────────────────────
-    dsr_cmd = (f'ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py '
-               f'model:=h2515 mode:={mode} host:={ip}')
-    procs.append(shell(dsr_cmd))
+    if mode == MODE_SIM:
+        # ── Simülasyon: dsr virtual emülatör + simulation:=true ──────────
+        dsr_cmd = (f'ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py '
+                   f'model:=h2515 mode:=virtual host:={ip}')
+        procs.append(shell(dsr_cmd))
 
-    # ── 2. Servis bekleme ────────────────────────────────────────────────
-    prog = QProgressDialog(
-        f'{"Emülatör" if sim else "Robot (" + ip + ")"} başlatılıyor…',
-        None, 0, 0
-    )
-    prog.setWindowTitle('Başlatılıyor')
-    prog.setWindowModality(Qt.WindowModality.ApplicationModal)
-    prog.setMinimumDuration(0)
-    prog.setValue(0)
-    prog.show()
-    app.processEvents()
+        prog = QProgressDialog('DSR emülatörü başlatılıyor…', None, 0, 0)
+        prog.setWindowTitle('Başlatılıyor')
+        prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        prog.setMinimumDuration(0); prog.setValue(0); prog.show()
+        app.processEvents()
 
-    ready = wait_for_service(app)
-    prog.close()
+        ready = wait_for_service(app)
+        prog.close()
 
-    if not ready:
-        QMessageBox.critical(
-            None, 'Bağlantı Hatası',
-            f'Robot servisleri başlatılamadı!\n\n'
-            f'• Ethernet kablosunun bağlı olduğunu kontrol edin\n'
-            f'• Robot IP adresini kontrol edin: {ip}\n'
-            f'• Robotun açık ve hazır olduğundan emin olun'
-        )
-        cleanup()
+        if not ready:
+            QMessageBox.warning(None, 'Uyarı',
+                'DSR emülatörü servisi bulunamadı.\n'
+                'Simülasyon modu yine de başlatılıyor.')
 
-    # ── 3. End Effector ──────────────────────────────────────────────────
-    ef_cmd = (f'ros2 launch end_effector_ros2 end_effector.launch.py '
-              f'use_real_robot:={use_real}')
+        ef_cmd = ('ros2 launch end_effector_ros2 end_effector.launch.py '
+                  'simulation:=true use_real_robot:=false use_gazebo:=false')
+
+    elif mode == MODE_CAN:
+        # ── CAN Donanım: sadece seri kart + kamera, DSR yok ─────────────
+        ef_cmd = ('ros2 launch end_effector_ros2 end_effector.launch.py '
+                  'simulation:=false use_real_robot:=false')
+
+    else:
+        # ── Gerçek Robot: dsr real + CAN kart ───────────────────────────
+        dsr_cmd = (f'ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py '
+                   f'model:=h2515 mode:=real host:={ip}')
+        procs.append(shell(dsr_cmd))
+
+        prog = QProgressDialog(f'Robot ({ip}) bağlanıyor…', None, 0, 0)
+        prog.setWindowTitle('Başlatılıyor')
+        prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        prog.setMinimumDuration(0); prog.setValue(0); prog.show()
+        app.processEvents()
+
+        ready = wait_for_service(app)
+        prog.close()
+
+        if not ready:
+            QMessageBox.critical(None, 'Bağlantı Hatası',
+                f'Robot servisleri başlatılamadı!\n\n'
+                f'• Ethernet kablosunun bağlı olduğunu kontrol edin\n'
+                f'• Robot IP: {ip}\n'
+                f'• Robotun açık ve hazır olduğundan emin olun')
+            cleanup()
+
+        ef_cmd = (f'ros2 launch end_effector_ros2 end_effector.launch.py '
+                  f'simulation:=false use_real_robot:=true')
+
     ef_proc = shell(ef_cmd)
     procs.append(ef_proc)
     ef_proc.wait()

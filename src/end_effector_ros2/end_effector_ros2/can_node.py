@@ -37,7 +37,7 @@ except ImportError:
 
 # ── Protokol Sabitleri ────────────────────────────────────────────────────────
 PACKET_HEADER    = 0xAA
-PACKET_LENGTH    = 10
+PACKET_LENGTH    = 9
 LOAD_CELL_OFFSET = 80
 LOAD_CELL_MIN    = -10.0
 LISTEN_INTERVAL  = 0.01
@@ -335,6 +335,9 @@ class CANNode(Node):
                     if vals:
                         self.load_cells = vals
                         consecutive_errors = 0
+                    elif waiting > 0:
+                        self.get_logger().debug(
+                            f'CAN RX raw ({waiting}B): {raw[:20].hex()}')
             except Exception as e:
                 consecutive_errors += 1
                 self.get_logger().error(f'CAN dinleme hatası: {e}')
@@ -352,9 +355,18 @@ class CANNode(Node):
     def _cb_servo_cmd(self, msg: String):
         try:
             data   = json.loads(msg.data)
-            s1     = int(data.get('s1',     self.last_s1))
-            s2     = int(data.get('s2',     self.last_s2))
             sander = int(data.get('sander', self.last_sander))
+
+            if 'camera' in data:
+                # Kamera kutusu: >0.01 = açık (S1=S2=35°), 0 = kapalı (S1=S2=160°)
+                s = 35 if float(data['camera']) > 0.01 else 160
+                self.get_logger().info(
+                    f'[CAMERA BOX] {"OPEN" if s==35 else "CLOSE"} → S1={s}° S2={s}°')
+                self._send_frame(s, s, sander)
+                return
+
+            s1 = int(data.get('s1', self.last_s1))
+            s2 = int(data.get('s2', self.last_s2))
             self._send_frame(s1, s2, sander)
         except Exception as e:
             self.get_logger().error(f'servo_command parse: {e}')
@@ -363,6 +375,9 @@ class CANNode(Node):
         try:
             data   = json.loads(msg.data)
             sander = int(data.get('sander', SANDER_OFF))
+            st = 'ON' if sander == SANDER_ON else 'OFF'
+            self.get_logger().info(
+                f'[SANDER] Komut alındı: {st} | CAN aktif: {self._can_active} | sim: {self.simulation}')
             self._send_frame(self.last_s1, self.last_s2, sander)
         except Exception as e:
             self.get_logger().error(f'sander_only parse: {e}')
@@ -413,9 +428,12 @@ class CANNode(Node):
                 with self._lock:
                     self._ser.write(frame)
                     self._ser.flush()
-                self.get_logger().debug(f'CAN TX → S1:{s1}° S2:{s2}° {st}')
+                self.get_logger().info(
+                    f'CAN TX → S1:{s1}° S2:{s2}° {st} | frame={frame.hex()}')
             except Exception as e:
                 self.get_logger().error(f'CAN TX: {e}')
+        elif not self._can_active:
+            self.get_logger().warn(f'CAN TX atlandı — _can_active=False (sim={self.simulation})')
 
         # 2. SOEM EtherCAT
         if self.soem:

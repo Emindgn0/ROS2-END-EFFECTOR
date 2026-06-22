@@ -455,9 +455,10 @@ class LogicNode(Node):
         D. [hedef başına] HOVER → Z İNİŞ → TEMAS → ZIMPARALA → GERİ ÇEK
         """
 
-        # A. Kamera servoyu aç
-        self._set_camera_servo(SERVO_OPEN_POS)
-        self._log('Kamera açıldı — taranıyor...')
+        # A. Tarama pozisyonu — S1=S2=160°
+        self.pub_servo.publish(String(data=json.dumps(
+            {'s1': 160, 's2': 160, 'sander': SANDER_OFF})))
+        self._log('Tarama pozisyonu — S1=S2=160°')
         time.sleep(0.5)
 
         # B. Tarama
@@ -489,9 +490,8 @@ class LogicNode(Node):
                 captured = [{'x': FRAME_CX, 'y': FRAME_CY, 'conf': 0.9, 'dist': 0.0}]
                 self._log('SİMÜLASYON: Ekran merkezine sahte çapak eklendi', 'WARN')
             else:
-                self._log('Hedef bulunamadı! Görev iptal.', 'ERROR')
+                self._log('Hedef bulunamadı — görev tamamlanıyor.', 'WARN')
                 self.current_guidance = {'dir': 'HEDEF YOK', 'dx': 0.0, 'dy': 0.0}
-                return
 
         self._log(f'Tarama tamamlandı — {len(captured)} çapak bulundu')
         targets = sorted(captured, key=lambda b: b.get('dist', 9999))

@@ -175,10 +175,11 @@ class ServoPanel(QGroupBox):
 # ── Ana Pencere ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
-    def __init__(self,node,bridge,dsr2):
+    def __init__(self,node,bridge,dsr2,is_sim_can=True):
         super().__init__()
         self.node=node; self.bridge=bridge; self.dsr2=dsr2
         self._can_ok=False; self._last_frame=0.0; self._cur_pix=None
+        self._is_sim_can = is_sim_can
 
         self.pub_start    = node.create_publisher(Bool,  '/end_effector/mission_start',  10)
         self.pub_shutdown = node.create_publisher(Bool,  '/end_effector/shutdown',        10)
@@ -192,6 +193,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+        # simulation:=false ile başlatıldıysa radio button'u gerçek donanıma ayarla
+        if not is_sim_can:
+            self.rb_real.setChecked(True)
         threading.Thread(target=self._init_dsr2,daemon=True).start()
         self.setWindowTitle('End Effector Control — ROS2 + DSR_ROBOT2')
         self.setMinimumSize(900,600); self.resize(1440,900)
@@ -472,8 +476,6 @@ class MainWindow(QMainWindow):
 
         # Mod radio butonları
         self.rb_sim.toggled.connect(self._on_mode_change)
-        # Başlangıç modu — 1sn sonra yayınla (node'lar hazır olsun)
-        QTimer.singleShot(1000, self._on_mode_change)
 
     # ── Yardımcılar ───────────────────────────────────────────────────────────
     def _log(self, msg: str):
@@ -542,8 +544,6 @@ class MainWindow(QMainWindow):
             'padding:5px;border:1px solid #114411;font-family:Consolas;'
             'font-size:11px;font-weight:bold;')
         self._log('[SANDER] ON')
-        if self.dsr2.connected and not self.rb_sim.isChecked():
-            self.dsr2.set_digital_output(1,True)
 
     def _sander_off(self):
         self.pub_sander.publish(String(data=json.dumps({'sander':SANDER_OFF})))
@@ -552,8 +552,6 @@ class MainWindow(QMainWindow):
             'padding:5px;border:1px solid #441111;font-family:Consolas;'
             'font-size:11px;font-weight:bold;')
         self._log('[SANDER] OFF')
-        if self.dsr2.connected and not self.rb_sim.isChecked():
-            self.dsr2.set_digital_output(1,False)
 
     def _emergency(self):
         self.pub_emerg.publish(Bool(data=True))
@@ -586,8 +584,12 @@ class MainWindow(QMainWindow):
             self._log('[MODE] Simulation selected — Gazebo + mock sensor active')
         else:
             self.bridge.can_connected = self._can_ok
-            self.lbl_can_st.setText('● Real Hardware — waiting for CAN...')
-            self.lbl_can_st.setStyleSheet('color:#ffaa00;font-family:Consolas;font-size:10px;')
+            if self._can_ok:
+                self.lbl_can_st.setText('● CAN: Connected ✓')
+                self.lbl_can_st.setStyleSheet('color:#00ff88;font-family:Consolas;font-size:10px;')
+            else:
+                self.lbl_can_st.setText('● Real Hardware — waiting for CAN...')
+                self.lbl_can_st.setStyleSheet('color:#ffaa00;font-family:Consolas;font-size:10px;')
             self.lbl_drfl.setText('Real Hardware — connecting DSR_ROBOT2...')
             self.lbl_drfl.setStyleSheet('color:#ffaa00;font-weight:bold;font-size:10px;')
             self._log('[MODE] Real Hardware selected — waiting for CAN + camera + DSR_ROBOT2')
@@ -727,12 +729,14 @@ def main(args=None):
     rclpy.init(args=args)
     ros_node=GUINode()
     ros_node.declare_parameter('use_real_robot', False)
-    use_real = ros_node.get_parameter('use_real_robot').get_parameter_value().bool_value
+    ros_node.declare_parameter('simulation', True)
+    use_real   = ros_node.get_parameter('use_real_robot').get_parameter_value().bool_value
+    is_sim_can = ros_node.get_parameter('simulation').get_parameter_value().bool_value
     bridge  =ROSBridge(ros_node)
     dsr2    =Dsr2Layer(node=ros_node, sim=not use_real, logger=ros_node.get_logger())
 
     app=QApplication(sys.argv); app.setStyle('Fusion')
-    win=MainWindow(ros_node,bridge,dsr2); win.showMaximized()
+    win=MainWindow(ros_node,bridge,dsr2,is_sim_can=is_sim_can); win.showMaximized()
 
     # QTimer ile spin_once — sinyaller Qt main thread'de işlenir, cross-thread sorun olmaz
     ros_timer = QTimer()
